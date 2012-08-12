@@ -1,0 +1,271 @@
+<?php
+
+/**
+* Display help and module information
+* @param path which path of the site we're displaying help
+* @param arg array that holds the current path as would be returned from arg() function
+* @return help text for the path
+*/
+function rs_search_help($path, $arg) {
+  $output = '';
+  switch ($path) {
+    case "admin/help#rs_search":
+      $output = '<p>'.t("Rocketseed search functionality.").'</p>';
+      break;
+  }
+  return $output;
+}
+
+/**
+* Valid permissions for this module
+* @return array An array of valid permissions for the rs_search module
+*/
+function rs_search_perm() {
+  return array(
+    'search Rocketseed data',
+  );
+} // function rs_search_perm()
+
+/** 
+* @brief Link a menu path to this form
+* 
+*/
+function rs_search_menu() {
+  $items = array();
+  $items['rs_search/form'] = array(
+    'title' => 'Rocketseed Search',
+    'description' => 'Display the Rocketseed search form',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('rs_search_search_form', 2, FALSE),
+    'access arguments' => array('search Rocketseed data',),
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+function rs_search_theme() {
+  return array(
+    'search_form' => array(
+      'template' => 'search-form',
+      'arguments' => array(
+        'form' => NULL,
+      ),
+    ),
+    'search_results' => array(
+      'arguments' => array(
+        'searchtext' => NULL,
+        'resultarry' => NULL
+      ),
+    ),
+  );
+}
+
+function rs_search_search_form(&$form_state, $SearchText, $block=FALSE) {
+  global $base_url;
+
+  $form = array(
+    '#theme' => 'search_form',
+    '#tree' => 0,
+  );
+  $form['search_text'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Search'),
+    '#default_value' => $SearchText,
+    '#size' => 15,
+    '#description' => t("Text to find."),
+    '#required' => TRUE,
+  );
+
+  $form['search'] = array(
+    '#type' => 'submit',
+    '#value' => t("Search"),
+  );
+
+  if (!$block) {
+    $form['results'] = array(
+      '#type' => 'markup',
+      '#value' => rs_search_display_results($SearchText),
+    );
+  }
+  return $form;
+}
+
+function rs_search_display_results($search_text) {
+  if (!$search_text) {
+    return;
+  }
+  require_once 'SearchResult.php';
+  require_once 'AccountResult.php';
+  require_once 'TemplateResult.php';
+  require_once 'PersonResult.php';
+  require_once 'GroupResult.php';
+
+  $rownum = 1;
+
+  $searchresults = array();
+
+  /* Search for accounts. */
+  db_set_active('rocketseed');
+  $result = db_query("SELECT * FROM \"mstAccount\" WHERE name ILIKE '%%%s%%'", $search_text);
+  db_set_active('default');
+  $all_matching = array();
+  while ($row = db_fetch_object($result)) {
+    $all_matching[] = $row;
+  }
+  foreach ($all_matching as $account) {
+    if (rscommon_UserAccess($account->id)) {
+      $searchresult = new AccountResult($account);
+      $searchresults[] = $searchresult;
+    }
+  }
+
+  /* Search for people. */
+  $sql = "SELECT * FROM \"apiSearchPerson\"(%d, '%s')";
+  db_set_active('rocketseed');
+  $result = db_query($sql, 0, $search_text);
+  db_set_active('default');
+  $form['#tree'] = 1;
+
+  while ($row = db_fetch_object($result)) {
+    if ($row->tsender == 't') {
+      $searchresult = new PersonResult($row->tid, 'Sender', $row->trelevance);
+      $searchresults[] = $searchresult;
+    }
+    if ($row->treceiver == 't') {
+      $searchresult = new PersonResult($row->tid, 'Receiver', $row->trelevance);
+      $searchresults[] = $searchresult;
+    }
+  }
+
+  /* Search for templates / inserts / etc. */
+  db_set_active('rocketseed');
+  $result = db_query("SELECT * FROM \"apiSearchTemplate\"(%d, '%s')", 0, $search_text);
+  db_set_active('default');
+
+  while ($row = db_fetch_object($result)) {
+    $searchresult = new TemplateResult($row->tid, $row->trelevance);
+    $searchresults[] = $searchresult;
+  }
+
+  /* Search for groups. */
+  $grouptypes = array(
+    'Template Groups',
+    'Sender Groups',
+    'Receiver Groups',
+  );
+  foreach ($grouptypes as $grouptype) {
+    db_set_active('rocketseed');
+    $result = db_query("SELECT * FROM \"apiSearchGroup\"(%d, '%s', '%s')", 0, $search_text, $grouptype);
+    db_set_active('default');
+
+    while ($row = db_fetch_object($result)) {
+      $searchresult = new GroupResult($grouptype, $row->tid, $row->trelevance);
+      $searchresults[] = $searchresult;
+    }
+  }
+  return theme('search_results', $search_text, $searchresults);
+}
+
+function theme_search_results($search_text, $resultarray) {
+  $html_safe_search_text = check_plain($search_text);
+  $regex_safe_search_text = preg_quote($search_text, '/');
+  $max_operations = 0;
+  $searchresults = array();
+  if (isset($resultarray)) {
+    foreach ($resultarray as $key => $res) {
+      $operations = $res->operations();
+      $n = count($operations);
+      if ($n > $max_operations) {
+        $max_operations = $n;
+      }
+      $pretty_name = check_plain($res->name($search_text));
+      if ($search_text !== '') {
+        $pretty_name = preg_replace("/($regex_safe_search_text)/i", "<b>$1</b>", $pretty_name);
+      }
+      $row = array(
+        $res->icon(),
+        $pretty_name,
+        '', // image description
+      );
+      foreach ($operations as $name => $link) {
+        if (is_array($link)) {
+          $url = $link['url'];
+          $options = $link['options'];
+        }
+        else {
+          $url = $link;
+          $options = array();
+        }
+        $row[] = l($name, $url, $options);
+      }
+      $pretty_description = $res->description($search_text);
+      if (get_class($res) == 'TemplateResult') { // put the image next to the name and don't mess with text
+        $row[2] = $pretty_description;
+        $pretty_description = '';
+      }
+      else {
+        if ($search_text !== '') {
+          $pretty_description = preg_replace("/$search_text/", "<b>$search_text</b>", $pretty_description);
+        }
+      }
+      $searchresults[] = $row;
+      $searchresults[] = array(
+        '',
+        array('data' => $pretty_description, 'colspan' => '1'),
+      );
+    }
+  }
+  $zebra = 0;
+  foreach ($searchresults as &$row) {
+    $fill = 3 + $max_operations - count($row);
+    if (!$zebra) {
+      /* Result summary row. */
+      if ($fill) {
+        $row[] = array('data' => '', 'colspan' => $fill);
+      }
+    }
+    else {
+      /* Result description row. */
+      $row[1]['colspan'] += $fill + 1;
+    }
+    $zebra = !$zebra;
+  }
+
+  if (count($searchresults)) {
+    /* Define the header after the cell data now that we know the number of columns. */
+    $header = array(
+      '',
+      array('data' => t('Name'), 'colspan' => 2,),
+      array('data' => t('Operations'), 'colspan' => $max_operations),
+    );
+    $output .= theme('table', $header, $searchresults, array('id' => 'searchresults'));
+  }
+  return $output;
+}
+
+function rs_search_search_form_submit($form, &$form_state) {
+  global $base_url;
+
+  if ($form_state['values']['search_text']!='') {
+    $SearchText = $form_state['values']['search_text'];
+  }
+  rscommon_log('Search', $SearchText);
+  $form_state['redirect'] = array("rs_search/form/".urlencode($SearchText), '');
+}
+
+/**
+ * The search block with the search form in it...
+ */
+function rs_search_block($op='list', $delta=0) {
+  // listing of blocks, such as on the admin/block page
+  if ($op == "list") {
+     $block[0]["info"] = t('Sender/Receiver Search');
+     return $block;
+  } else if ($op == 'view') {
+    $block['subject'] = 'Search Senders/Receivers';
+    $block['content'] = drupal_get_form('rs_search_search_form', '', TRUE);
+    return $block;
+  }
+} 
+
+/* vim: set et ft=php sw=2: */

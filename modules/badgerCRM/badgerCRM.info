@@ -1,0 +1,7 @@
+; $Id$
+name = Badger CRM
+description = "Light CRM"
+core = 6.x
+dependencies[] = 
+package = "HoneyBadger Tools"
+version = "6.x-0.1"

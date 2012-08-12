@@ -1,0 +1,271 @@
+<?php
+// $Id: $
+
+/**
+ * @file
+ * badgerCRM_install/uninstall hooks for the CRM tables and updates
+ */
+
+/**
+ * Implementation of hook_schema
+ */
+function badgerCRM_schema() {
+  $schema['person'] = array(
+    'description' => t('A person with all details'),
+    'fields' => array(
+      'id' => array(
+        'type' => 'serial',
+      ),
+      'firstname' => array(
+        'type' => 'text',
+        'not null' => TRUE,
+      ),
+      'surname' => array(
+        'type' => 'text',
+        'not null' => TRUE,
+      ),
+      'email' => array(
+        'type' => 'text',
+      ),
+      'address' => array(
+        'type' => 'text',
+      ),
+      'phone' => array(
+        'type' => 'text',
+      ),
+      'fax' => array(
+        'type' => 'text',
+      ),
+      'status' => array(
+        'type' => 'int',
+        'default' => 0,
+      ),
+    ),
+  );
+  $schema['course'] = array(
+    'description' => t('Courses on offer from oceansailing.'),
+    'fields' => array(
+      'id' => array(
+        'type' => 'serial',
+        'not null' => TRUE,
+      ),
+      'code' => array(
+        'type' => 'text',
+      ),
+      'name' => array(
+        'type' => 'text',
+      ),
+      'description' => array(
+        'type' => 'text',
+      ),
+    ),
+  );
+  $schema['person_course'] = array(
+    'description' => t('Persons status wrt courses'),
+    'fields' => array(
+      'person' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+      ),
+      'course' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+      ),
+      'date' => array(
+        'type' => 'datetime',
+      ),
+    ),
+  );
+  $schema['status'] = array(
+    'description' => t('Possible statuses a person might be in.');
+  );
+  $schema['person_notes'] = array(
+    'description' => t('Timestamped notes.');
+  );
+}
+
+/**
+ * Implementation of hook_install().
+ * This is where we install the migration database tables.  These tables are used
+ * to store customer data.
+ */
+function badgerCRM_install() {
+  $ret = array();
+
+  drupal_set_message(t("In badgerCRM_install adding tables to the database..."));
+  $table_exists = db_result(db_query("SELECT TRUE FROM information_schema.tables WHERE table_name = 'migADEntities' AND table_schema = 'public'"));
+
+  if (!$table_exists) {
+    $create_sql = <<< EOS
+CREATE TABLE "migADEntities"(
+  id SERIAL,
+  account_id INTEGER NOT NULL,
+  ad_id INTEGER NOT NULL,
+  ad_type TEXT,
+  rs_id INTEGER
+) WITHOUT OIDS;
+ALTER TABLE "migADEntities" ADD CONSTRAINT "migADEntities_pk_id" PRIMARY KEY (id);
+ALTER TABLE "migADEntities" ADD CONSTRAINT "migADEntities_key" UNIQUE (account_id, ad_id, ad_type);
+EOS;
+
+    db_set_active('rocketseed');
+    $ret[] = update_sql($create_sql);
+    db_set_active('default');
+  }
+  else {
+    drupal_set_message(t("AD migration table found, not recreating"));
+  }
+
+  rs_ad_sync_createSaveStoredProc($ret);
+  rs_ad_sync_createGetStoredProc($ret);
+  rs_ad_sync_createGetAllStoredProc($ret);
+  rs_ad_sync_createDeleteStoredProc($ret);
+  return($ret);
+}
+
+function rs_ad_sync_createSaveStoredProc(&$ret) {
+/************ Stored Proc *************/
+$SPSQL = <<< EOS
+CREATE OR REPLACE FUNCTION "apiSaveADEntity"(
+  IN taccount_id INTEGER,
+  IN tad_id INTEGER,
+  IN tad_type TEXT,
+  IN trs_id INTEGER
+) RETURNS VOID AS $$
+DECLARE
+ texists BOOLEAN;
+
+BEGIN
+  SELECT TRUE INTO texists
+  FROM "migADEntities"
+  WHERE account_id = taccount_id
+    AND ad_id = tad_id
+    AND ad_type = tad_type;
+
+  IF texists IS NULL THEN
+    INSERT INTO "migADEntities" (account_id, ad_id, ad_type, rs_id)
+    VALUES (taccount_id, tad_id, tad_type, trs_id);
+  ELSE
+    UPDATE "migADEntities" SET rs_id = trs_id
+    WHERE account_id = taccount_id
+      AND ad_id = tad_id
+      AND ad_type = tad_type;
+  END IF;
+END;
+
+$$ LANGUAGE 'plpgsql' VOLATILE;
+EOS;
+/************ /Stored Proc *************/
+
+  db_set_active('rocketseed');
+  $ret[] = db_query($SPSQL);
+  db_set_active('default');
+}
+
+function rs_ad_sync_createGetStoredProc(&$ret) {
+/************ Stored Proc *************/
+$SPSQL = <<< EOS
+CREATE OR REPLACE FUNCTION "apiGetADEntity"(
+  IN taccount_id INTEGER,
+  IN tad_id INTEGER,
+  IN tad_type TEXT,
+  OUT trs_id INTEGER
+) RETURNS INTEGER AS $$
+
+BEGIN
+  SELECT rs_id INTO trs_id
+  FROM "migADEntities"
+  WHERE account_id = taccount_id
+    AND ad_id = tad_id
+    AND ad_type = tad_type;
+
+END;
+
+$$ LANGUAGE 'plpgsql' VOLATILE;
+EOS;
+/************ /Stored Proc *************/
+
+  db_set_active('rocketseed');
+  $ret[] = db_query($SPSQL);
+  db_set_active('default');
+}
+
+function rs_ad_sync_createGetAllStoredProc(&$ret) {
+/************ Stored Proc *************/
+$SPSQL = <<< EOS
+CREATE OR REPLACE FUNCTION "apiGetADEntities"(
+  IN taccount_id INTEGER,
+  OUT tad_id INTEGER,
+  OUT tad_type TEXT,
+  OUT trs_id INTEGER
+) RETURNS SETOF RECORD AS $$
+DECLARE
+  tRec RECORD;
+BEGIN
+  FOR tRec IN
+    SELECT *
+    FROM "migADEntities"
+    WHERE account_id = taccount_id
+    ORDER BY ad_type, ad_id
+  LOOP
+    tad_id := tRec.ad_id;
+    tad_type := tRec.ad_type;
+    trs_id := tRec.rs_id;
+    RETURN NEXT;
+  END LOOP;
+  RETURN;
+END;
+
+$$ LANGUAGE 'plpgsql' STABLE;
+EOS;
+/************ /Stored Proc *************/
+
+  db_set_active('rocketseed');
+  $ret[] = db_query($SPSQL);
+  db_set_active('default');
+}
+
+function rs_ad_sync_createDeleteStoredProc(&$ret) {
+/************ Stored Proc *************/
+$SPSQL = <<< EOS
+CREATE OR REPLACE FUNCTION "apiDeleteADEntity"(
+  IN taccount_id INTEGER,
+  IN tad_id INTEGER,
+  IN tad_type TEXT,
+  IN trs_id INTEGER
+) RETURNS VOID AS $$
+
+BEGIN
+  DELETE
+  FROM "migADEntities"
+  WHERE account_id = taccount_id
+    AND (ad_id = tad_id OR rs_id = trs_id)
+    AND ad_type = tad_type;
+END;
+
+$$ LANGUAGE 'plpgsql' VOLATILE;
+EOS;
+/************ /Stored Proc *************/
+
+  db_set_active('rocketseed');
+  $ret[] = db_query($SPSQL);
+  db_set_active('default');
+}
+
+
+/**
+ * Remove variables on uninstall.
+ */
+function rs_ad_sync_uninstall() {
+  $ret = array();
+
+  db_set_active('rocketseed');
+  $ret[] = db_query("DROP TABLE \"migADEntities\"");
+  $ret[] = db_query("DROP FUNCTION \"apiSaveADEntity\"(INTEGER, INTEGER, TEXT, INTEGER)");
+  $ret[] = db_query("DROP FUNCTION \"apiGetADEntity\"(INTEGER, INTEGER, TEXT)");
+  db_set_active('default');
+
+  db_query("DELETE FROM {variable} WHERE name LIKE 'rs_ad_sync_%%'");
+  cache_clear_all('variables', 'cache');
+}
+
